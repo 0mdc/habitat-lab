@@ -126,7 +126,7 @@ class RearrangeSim(HabitatSim):
         return target_trans
 
     def _try_acquire_context(self):
-        if self.habitat_config.concur_render:
+        if self.habitat_config.concur_render and self.renderer:
             self.renderer.acquire_gl_context()
 
     def sleep_all_objects(self):
@@ -599,6 +599,7 @@ class RearrangeSim(HabitatSim):
     def step(self, action: Union[str, int]) -> Observations:
         rom = self.get_rigid_object_manager()
 
+        # TODO
         if self.habitat_config.debug_render:
             if self.habitat_config.debug_render_robot:
                 self.robots_mgr.update_debug()
@@ -630,7 +631,12 @@ class RearrangeSim(HabitatSim):
 
         self.maybe_update_robot()
 
-        if self.habitat_config.concur_render:
+        # TODO
+        if self.habitat_config.use_batch_renderer:
+            # batch rendering happens elsewhere
+            for _ in range(self.ac_freq_ratio):
+                self.internal_step(-1, update_robot=False)
+        elif self.habitat_config.concur_render:
             self._prev_sim_obs = self.start_async_render()
 
             for _ in range(self.ac_freq_ratio):
@@ -644,7 +650,12 @@ class RearrangeSim(HabitatSim):
             self._prev_sim_obs = self.get_sensor_observations()
             obs = self._sensor_suite.get_observations(self._prev_sim_obs)
 
+        # TODO?
+        self.check_add_sim_blob_observation(obs)
+        
         if self.habitat_config.habitat_sim_v0.enable_gfx_replay_save:
+            # sloppy: don't currently support both batch-render and save_keyframe
+            assert not self.habitat_config.use_batch_renderer
             self.gfx_replay_manager.save_keyframe()
         self.step_idx += 1
 

@@ -900,6 +900,7 @@ _C.habitat.simulator.habitat_sim_v0.enable_physics = False
 _C.habitat.simulator.habitat_sim_v0.physics_config_file = (
     "./data/default.physics_config.json"
 )
+_C.habitat.simulator.habitat_sim_v0.use_batch_renderer = True
 # Possibly unstable optimization for extra performance with concurrent rendering
 _C.habitat.simulator.habitat_sim_v0.leave_context_with_background_renderer = (
     False

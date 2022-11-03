@@ -176,6 +176,7 @@ class RearrangeTask(NavigationTask):
     def _get_observations(self, episode):
         obs = self._sim.get_sensor_observations()
         obs = self._sim._sensor_suite.get_observations(obs)
+        self._sim.check_add_sim_blob_observation(obs)
 
         task_obs = self.sensor_suite.get_observations(
             observations=obs, episode=episode, task=self

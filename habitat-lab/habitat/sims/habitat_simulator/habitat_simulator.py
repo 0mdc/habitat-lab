@@ -158,7 +158,9 @@ class HabitatSimDepthSensor(DepthSensor, HabitatSimSensor):
         self, sim_obs: Dict[str, Union[np.ndarray, bool, "Tensor"]]
     ) -> VisualObservation:
         obs = cast(Optional[VisualObservation], sim_obs.get(self.uuid, None))
+
         check_sim_obs(obs, self)
+
         if isinstance(obs, np.ndarray):
             obs = np.clip(obs, self.config.min_depth, self.config.max_depth)
 
@@ -392,7 +394,12 @@ class HabitatSim(habitat_sim.Simulator, Simulator):
             sim_obs = self.get_sensor_observations()
 
         self._prev_sim_obs = sim_obs
-        return self._sensor_suite.get_observations(sim_obs)
+        ### TODO
+        sensor_suite_obs = self._sensor_suite.get_observations(sim_obs)
+        self.check_add_sim_blob_observation(sensor_suite_obs)
+        return sensor_suite_obs
+        ### TODO
+        #return self._sensor_suite.get_observations(sim_obs)
 
     def step(self, action: Union[str, np.ndarray, int]) -> Observations:
         sim_obs = super().step(action)
