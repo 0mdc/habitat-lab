@@ -1284,6 +1284,7 @@ class SimulatorConfig(HabitatBaseConfig):
     auto_sleep: bool = False
     step_physics: bool = True
     concur_render: bool = False
+    enable_batch_renderer: bool = False
     # If markers should be updated at every step:
     needs_markers: bool = True
     # If the articulated_agent camera positions should be updated at every step:
@@ -1407,6 +1408,7 @@ class DatasetConfig(HabitatBaseConfig):
         "data/datasets/pointnav/"
         "habitat-test-scenes/v1/{split}/{split}.json.gz"
     )
+    composite_file: str = ""
 
 
 @attr.s(auto_attribs=True, slots=True)
