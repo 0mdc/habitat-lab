@@ -22,7 +22,7 @@ from typing import (
     Set,
     Tuple,
     Union,
-    cast,
+    cast, OrderedDict,
 )
 
 import attr
@@ -669,5 +669,23 @@ class BatchRenderVectorEnv(VectorEnv):
         self._config = config
         self._batch_renderer = BatchRenderer(config, self.num_envs)
 
-    def post_step(self, observations) -> None:
-        self._batch_renderer.render(observations)
+    def render(
+        self, mode: str = "human", *args, **kwargs
+    ) -> Optional[np.ndarray]:
+        r"""Renders observations from all environments in a tiled image.
+        Observations from the last post_step call are displayed."""
+        images = self._batch_renderer.copy_output_to_image()
+        tile = tile_images(images)
+        if mode == "human":
+            from habitat.core.utils import try_cv2_import
+            cv2 = try_cv2_import()
+            cv2.imshow("BatchRenderVectorEnv", tile[:, :, ::-1])
+            cv2.waitKey(1)
+            return None
+        elif mode == "rgb_array":
+            return tile
+        else:
+            raise NotImplementedError
+
+    def post_step(self, observations) -> List[OrderedDict]:
+        return self._batch_renderer.render(observations)
