@@ -126,7 +126,7 @@ class BatchRenderer:
             )
 
         # Batch render
-        self._replay_renderer.render()
+        #self._replay_renderer.render()
 
         # Get observations
         batch_observations: Dict[Union[np.ndarray, Tensor]] = {}
@@ -154,8 +154,9 @@ class BatchRenderer:
         """
         # TODO: Only one sensor supported
         if self._gpu_gpu:
+            cuda_pointers = self._replay_renderer.render_into_cuda_buffers(sensor_spec.sensor_type == habitat_sim.SensorType.COLOR, sensor_spec.sensor_type == habitat_sim.SensorType.DEPTH)
             if sensor_spec.sensor_type == habitat_sim.SensorType.COLOR:
-                cuda_ptr = self._replay_renderer.cuda_color_buffer_device_pointer()
+                cuda_ptr = cuda_pointers.color
                 assert self._torch_utils.is_capsule_valid(cuda_ptr)
                 tensor = self._torch_utils.make_color_tensor(
                     cuda_ptr,
@@ -163,17 +164,19 @@ class BatchRenderer:
                     self._num_envs,
                     sensor_spec.resolution,
                 )[..., 0:3]  # Discard alpha channel
+                # TODO flip
+                #torch.flip(tensor, [1])
                 return tensor
 
             elif sensor_spec.sensor_type == habitat_sim.SensorType.DEPTH:
-                cuda_ptr = self._replay_renderer.cuda_depth_buffer_device_pointer()
+                cuda_ptr = cuda_pointers.depth
                 assert self._torch_utils.is_capsule_valid(cuda_ptr)
                 tensor = self._torch_utils.make_depth_tensor(
                     cuda_ptr,
                     self._replay_renderer_cfg.gpu_device_id,
                     self._num_envs,
                     sensor_spec.resolution,
-                )
+                )#TODO flip
                 return tensor
         else:
             #TODO
