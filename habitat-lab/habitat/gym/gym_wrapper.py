@@ -26,7 +26,6 @@ try:
 except ImportError:
     pygame = None
 
-
 HabGymWrapperObsType = Union[np.ndarray, Dict[str, np.ndarray]]
 
 
@@ -64,7 +63,7 @@ def _is_continuous(original_space: gym.Space) -> bool:
     if isinstance(original_space, Mapping):
         return any((_is_continuous(v) for v in original_space.values()))
     raise NotImplementedError(
-        f"Unknow action space found : {original_space}. Can only be Box or Empty"
+        f"Unknown action space found : {original_space}. Can only be Box or Empty"
     )
 
 
@@ -86,7 +85,7 @@ def _recursive_continuous_size_getter(
             _recursive_continuous_size_getter(v, low, high)
     else:
         raise NotImplementedError(
-            f"Unknow continuous action space found : {original_space}. Can only be Box, Empty or Dict."
+            f"Unknown continuous action space found : {original_space}. Can only be Box, Empty or Dict."
         )
 
 
