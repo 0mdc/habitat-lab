@@ -68,9 +68,8 @@ class ImportItem:
 
 class Rig:
     armature = None
-    id_to_bone_map: dict = {}
-    debug_point_cloud: dict = {}
-    inverse_root_transform = None
+    bone_map: dict = {}
+    point_cloud: dict = {}
 
 def import_scene_helper(raw_filepath):
     """
@@ -207,8 +206,6 @@ def import_gfx_replay(replay_filepath, settings):
     render_asset_map = {}
     asset_info_by_filepath = {}
     asset_info_by_key = {}
-
-
     rig_map: Dict(int, Rig) = {}
 
     do_add_anim_keyframes = len(keyframes) > 1
@@ -220,7 +217,7 @@ def import_gfx_replay(replay_filepath, settings):
                 asset_info_by_filepath[filepath] = asset_info
         
         if "creations" in keyframe:
-            last_scene_idx = 0 #TODO: ??
+            last_scene_idx = 0
             for i, x in enumerate(keyframe["creations"]):
                 fpath = x["creation"]["filepath"].split("/")[-1]
                 if "Stage" in fpath:
@@ -248,33 +245,39 @@ def import_gfx_replay(replay_filepath, settings):
                     rig = Rig()
                     rig.armature = obj
                     rig_map[creation_dict["creation"]["rigId"]] = rig
-                    
-
 
         if "boneCreations" in keyframe:
             for bone_creation_dict in keyframe["boneCreations"]:
-                rigId = bone_creation_dict["rigId"]
-                boneId = bone_creation_dict["id"]
+                rig_id = bone_creation_dict["rigId"]
+                bone_id = bone_creation_dict["id"]
                 boneName = bone_creation_dict["name"]
 
-                rig = rig_map[rigId]
+                rig = rig_map[rig_id]
 
                 for bone in rig.armature.pose.bones:
                     if bone.name == boneName:
-                        rig.id_to_bone_map[boneId] = bone
+                        rig.bone_map[bone_id] = bone
 
-                        # debug point cloud
-                        mesh = bpy.data.meshes.new('_debug_' + bone.name)
-                        obj = bpy.data.objects.new('_debug_' + str(bone.name), mesh)
+                        # Create animation point cloud.
+                        mesh = bpy.data.meshes.new('_source_' + str(rig_id) + '_' + bone.name)
+                        obj = bpy.data.objects.new('_source_' + str(rig_id) + '_' + str(bone.name), mesh)
+                        rig.point_cloud[bone_id] = obj
                         bpy.context.collection.objects.link(obj)
-                        bpy.context.view_layer.objects.active = obj
-                        obj.select_set(True)
-                        bm = bmesh.new()
+                        
+                        # Uncomment to visualize point cloud
+                        #bpy.context.view_layer.objects.active = obj
+                        #obj.select_set(True)
+                        #bm = bmesh.new()
                         #bmesh.ops.create_uvsphere(bm, u_segments=8, v_segments=8, radius=0.025)
-                        bmesh.ops.create_cone(bm, segments=8, radius1=0.01, radius2=0, depth=0.1)
-                        bm.to_mesh(mesh)
-                        bm.free()
-                        rig.debug_point_cloud[boneId] = obj
+                        #bm.to_mesh(mesh)
+                        #bm.free()
+
+                        # This is required for keyframing quaternion rotations.
+                        obj.rotation_mode = "QUATERNION"
+
+                        # Add constraint to bone so that it follows its associated point in the point cloud.
+                        constraint = bone.constraints.new('COPY_TRANSFORMS')
+                        constraint.target = obj
                         break
 
         if "stateUpdates" in keyframe:
@@ -315,52 +318,27 @@ def import_gfx_replay(replay_filepath, settings):
                     raise NotImplementedError(
                         "unexpected coordinate frame " + frame
                     )
-                
-                # TODO: Model is rotated during import. Figure out where this comes from.
-                #if obj.name == "SMPLX-female":
-                #    obj.rotation_mode = "XYZ"
-                #    obj.rotation_euler[0] += 1.5708
 
         # Update scene.
-        # Without this step, some matrices, like `Object.matrix_world`, won't be updated by Blender after the previous step.
         bpy.context.view_layer.update()
-        
-        if "rigUpdates" in keyframe:
-            for rig_update_dict in keyframe["rigUpdates"]:
-                rigId = rig_update_dict["rigId"]
 
-                rig_world_translation = rig_update_dict["rootTransform"]["translation"]
-                rig_world_translation = (
-                    rig_world_translation[0],
-                    -rig_world_translation[2],
-                    rig_world_translation[1],
-                )
-                rig_world_translation = mathutils.Matrix.Translation(rig_world_translation)
+        # Grounding translation
+        # TODO: The model isn't grounded. For now, this empirical correction is used.
+        rig_grounding_matrix = mathutils.Matrix.Translation([0.0, 0.0, -0.41])
 
-                rig_world_rotation = rig_update_dict["rootTransform"]["rotation"]
-                rig_world_rotation = (
-                    rig_world_rotation[0],
-                    rig_world_rotation[1],
-                    -rig_world_rotation[3],
-                    rig_world_rotation[2],
-                )
-                rig_world_rotation = mathutils.Quaternion(rig_world_rotation)
-                rig_world_rotation = rig_world_rotation.to_matrix()
-                rig_world_rotation.resize_4x4()
-
-                rig_rotation_correction = mathutils.Matrix.Rotation(-1.5708, 4, 'X')
-
-                rig_world_matrix = rig_world_translation @ rig_world_rotation @ rig_rotation_correction
-
-                rig.inverse_root_transform = rig_world_matrix.inverted()
+        # Bone orientation correction matrix
+        # TODO: The model bone orientation is wrong. For now, this empirical correction is used.
+        bone_correction_matrix = mathutils.Matrix(((1.0, 0.0, 0.0, 0.0),
+                                                   (0.0, 0.0,-1.0, 0.0),
+                                                   (0.0, 1.0, 0.0, 0.0),
+                                                   (0.0, 0.0, 0.0, 1.0)))
 
         if "boneUpdates" in keyframe:
-            
             for bone_update_dict in keyframe["boneUpdates"]:
-                rigId = bone_update_dict["rigId"]
-                boneId = bone_update_dict["boneId"]
-                rig = rig_map[rigId]
-                bone = rig.id_to_bone_map[boneId]
+                rig_id = bone_update_dict["rigId"]
+                bone_id = bone_update_dict["boneId"]
+                rig = rig_map[rig_id]
+                bone = rig.bone_map[bone_id]
 
                 bone_world_translation = bone_update_dict["absTransform"]["translation"]
                 bone_world_translation = (
@@ -381,49 +359,11 @@ def import_gfx_replay(replay_filepath, settings):
                 bone_world_rotation = bone_world_rotation.to_matrix()
                 bone_world_rotation.resize_4x4()
 
-                correction_matrix = mathutils.Matrix(((1.0, 0.0, 0.0, 0.0),
-                                                      (0.0, 0.0, -1.0, 0.0),
-                                                      (0.0, 1.0, 0.0, 0.0),
-                                                      (0.0, 0.0, 0.0, 1.0)))
-                bone_world_matrix = bone_world_translation @ bone_world_rotation# @ correction_matrix
+                bone_world_matrix = rig_grounding_matrix @ bone_world_translation @ bone_world_rotation @ bone_correction_matrix
 
-                bone_rotation_correction = mathutils.Matrix.Rotation(1.5708, 4, 'X')
-                # Hack: Offset correction. Some transform is not correctly applied. Until it is found, this works fine for the demo model:
-                root_rotation_correction = mathutils.Matrix.Translation([0,0.42,0]) @ mathutils.Matrix.Rotation(1, 4, 'Y') @ mathutils.Matrix.Rotation(1.5708, 4, 'X')
-                #root_rotation_correction = mathutils.Matrix.Translation([0,0.42,0]) @ mathutils.Matrix.Rotation(1.5708, 4, 'Y') @ mathutils.Matrix.Rotation(1.5708, 4, 'X')
-                
-                # Obscure Hack: Bone matrix manipulation is less jittery in 'POSE' mode.
-                # Select armature and set editor mode to POSE
-                #bpy.context.view_layer.objects.active = rig.armature
-                #rig.armature.select_set(True)
-                #bpy.ops.object.mode_set(mode="POSE")
-
-                #rig.armature.matrix_world.inverted() vs rig.inverse_root_transform
-
-
-                root_bone = None
-                for armature_bone in rig.armature.pose.bones:
-                    if armature_bone.parent == None:
-                        root_bone = armature_bone
-                        break
-                root_bone_world_matrix = rig.armature.matrix_world# @ root_bone.matrix
-                root_bone_world_translation = mathutils.Matrix.Translation(root_bone_world_matrix.decompose()[0])
-
-                bone_pose_matrix = root_rotation_correction @ root_bone_world_translation.inverted() @ bone_world_matrix @ bone_rotation_correction
-                bone.matrix = bone_pose_matrix
-
-                rig.debug_point_cloud[boneId].matrix_world = bone_world_matrix
-
-                # matrix_local = matrix_parent_inverse * matrix_basis, and matrix_world = parent.matrix_world * matrix_local
-                #NOTE:
-                #Habitat calculation from world space coords:
-                #  jointTransformations_[i] =
-                #    invRootTransform *
-                #    jointNodeIt->second->absoluteTransformationMatrix() *
-                #    skin->inverseBindMatrices()[i];
-                #NOTE:
-                #https://blender.stackexchange.com/questions/44637/how-can-i-manually-calculate-bpy-types-posebone-matrix-using-blenders-python-ap
-                #https://blender.stackexchange.com/questions/109815/how-can-i-move-a-posebone-to-a-specific-world-space-position
+                # The bones are animated by constraining them to their associated point in the point cloud.
+                # This animation method is used to avoid animation jittering caused by directly assigning bone matrices.
+                rig.point_cloud[bone_id].matrix_world = bone_world_matrix
 
         if do_add_anim_keyframes:
             for instance_key in render_asset_map:
@@ -432,12 +372,12 @@ def import_gfx_replay(replay_filepath, settings):
                 obj.keyframe_insert(
                     data_path="rotation_quaternion", frame=keyframe_index
                 )
-            for rigId, rig in rig_map.items():
-                for boneId, bone in rig.id_to_bone_map.items():
-                    bone.keyframe_insert(data_path="location", frame=keyframe_index)
-                    bone.keyframe_insert(data_path="rotation_quaternion", frame=keyframe_index)
-                    rig.debug_point_cloud[boneId].keyframe_insert(data_path="location", frame=keyframe_index)
-                    rig.debug_point_cloud[boneId].keyframe_insert(data_path="rotation_quaternion", frame=keyframe_index)
+            for rig_id, rig in rig_map.items():
+                rig.armature.keyframe_insert(data_path="location", frame=keyframe_index)
+                rig.armature.keyframe_insert(data_path="rotation_quaternion", frame=keyframe_index)
+                for bone_id, bone in rig.bone_map.items():
+                    rig.point_cloud[bone_id].keyframe_insert(data_path="location", frame=keyframe_index)
+                    rig.point_cloud[bone_id].keyframe_insert(data_path="rotation_quaternion", frame=keyframe_index)
 
     for o in bpy.context.scene.objects:
         o.hide_set(False)
