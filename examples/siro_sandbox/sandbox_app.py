@@ -66,7 +66,6 @@ class SandboxState(Enum):
     INTRO_FOCUS_AVATAR = 3
     INTRO_FOCUS_TARGET = 4
 
-
 @requires_habitat_sim_with_bullet
 class SandboxDriver(GuiAppDriver):
     def __init__(self, args, config, gui_input):
@@ -895,7 +894,8 @@ class SandboxDriver(GuiAppDriver):
             np.flipud(image) for image in debug_images
         ]
 
-        self._update_text()
+        if self._sandbox_state == SandboxState.SIMULATION:
+            self._update_text()
 
         return post_sim_update_dict
 
