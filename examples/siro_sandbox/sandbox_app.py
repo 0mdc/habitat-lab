@@ -9,16 +9,19 @@ See README.md in this directory.
 """
 
 import ctypes
+import math
 
 # must call this before importing habitat or magnum! avoids EGL_BAD_ACCESS error on some platforms
 import sys
+from math import radians
 
 flags = sys.getdlopenflags()
 sys.setdlopenflags(flags | ctypes.RTLD_GLOBAL)
 
 import argparse
+from enum import Enum
 from functools import wraps
-from typing import Any, List
+from typing import Any, List, Tuple
 
 import magnum as mn
 import numpy as np
@@ -57,6 +60,13 @@ def requires_habitat_sim_with_bullet(callable_):
     return wrapper
 
 
+class SandboxState(Enum):
+    SIMULATION = 1
+    INTRO_SCENE_OVERVIEW = 2
+    INTRO_FOCUS_AVATAR = 3
+    INTRO_FOCUS_TARGET = 4
+
+
 @requires_habitat_sim_with_bullet
 class SandboxDriver(GuiAppDriver):
     def __init__(self, args, config, gui_input):
@@ -88,6 +98,23 @@ class SandboxDriver(GuiAppDriver):
         self._viz_anim_fraction = 0.0
 
         self.lookat = None
+
+        self._first_frame = True
+        self._sandbox_state = (
+            SandboxState.SIMULATION
+            if not args.show_tutorial
+            else SandboxState.INTRO_SCENE_OVERVIEW
+        )
+        self._intro_previous_target_camera_transform: Tuple[
+            mn.Vector3, mn.Matrix4
+        ] = None
+        self._intro_target_camera_transform: Tuple[
+            mn.Vector3, mn.Matrix4
+        ] = None
+        self._intro_transition_total_time: float = 0.0
+        self._intro_transition_current_time: float = 0.0
+        self._intro_state_total_time: float = 2.0
+        self._intro_state_current_time: float = 0.0
 
         if self.is_free_camera_mode() and args.first_person_mode:
             raise RuntimeError(
@@ -571,6 +598,160 @@ class SandboxDriver(GuiAppDriver):
 
         self._text_drawer.add_text(s, TextOnScreenAlignment.TOP_LEFT)
 
+        return mn.Matrix4.identity_init()
+
+    def _ease_fn_in_out_quat(self, t: float):
+        if t < 0.5:
+            return 16 * t * pow(t, 4)
+        else:
+            return 1 - pow(-2 * t + 2, 4) / 2
+
+    def _create_target_view_position(self, camera_fov, target_bb: mn.Range3D):
+        r"""
+        Creates a position matrix for a top-down camera such as the entire 'target_bb' bounding box is visible.
+        """
+        camera_fov_rad = radians(camera_fov)
+        target_dimension = max(target_bb.size_x(), target_bb.size_z())
+        camera_position = mn.Vector3(
+            target_bb.center_x(),
+            target_bb.center_y()
+            + abs(target_dimension / math.sin(camera_fov_rad / 2)),
+            target_bb.center_z(),
+        )
+        return camera_position
+
+    def _get_cam_transform(
+        self, state: SandboxState
+    ) -> Tuple[mn.Vector3, mn.Matrix4]:
+        sim = self.get_sim()
+        camera_fov_deg = 90  # TODO: Get camera field of view from config
+        top_down_rotation = mn.Matrix4.rotation_x(mn.Deg(-90))
+
+        if state == SandboxState.INTRO_SCENE_OVERVIEW:
+            root_node = sim.get_active_scene_graph().get_root_node()
+            root_node.compute_cumulative_bb()  # TODO: Was this already computed before?
+            target_bb: mn.Range3D = root_node.cumulative_bb
+            return (
+                self._create_target_view_position(camera_fov_deg, target_bb),
+                top_down_rotation,
+            )
+
+        elif state == SandboxState.INTRO_FOCUS_AVATAR:
+            agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
+            assert agent_idx is not None
+            art_obj = (
+                self.get_sim().agents_mgr[agent_idx].articulated_agent.sim_obj
+            )
+            root_node = art_obj.get_link_scene_node(
+                -1
+            )  # Root link always has index -1
+
+            target_bb = mn.Range3D.from_center(
+                mn.Vector3(root_node.absolute_translation),
+                mn.Vector3(1.0, 1.0, 1.0),
+            )  # Assume 2x2x2m bounding box
+
+            return (
+                self._create_target_view_position(camera_fov_deg, target_bb),
+                top_down_rotation,
+            )
+
+        elif state == SandboxState.INTRO_FOCUS_TARGET:
+            idxs, goal_pos = sim.get_targets()
+            scene_pos = sim.get_scene_pos()
+            target_pos = scene_pos[idxs]
+            this_target_pos = target_pos[0]
+            target_bb = mn.Range3D.from_center(
+                mn.Vector3(this_target_pos), mn.Vector3(0.5, 0.5, 0.5)
+            )  # Assume 1x1x1m bounding box
+            return (
+                self._create_target_view_position(camera_fov_deg, target_bb),
+                top_down_rotation,
+            )
+
+        elif state == SandboxState.SIMULATION:
+            # TODO
+            agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
+            assert agent_idx is not None
+            art_obj = (
+                self.get_sim().agents_mgr[agent_idx].articulated_agent.sim_obj
+            )
+            root_node = art_obj.get_link_scene_node(
+                -1
+            )  # Root link always has index -1
+
+            target_bb = mn.Range3D.from_center(
+                mn.Vector3(root_node.absolute_translation),
+                mn.Vector3(1.0, 1.0, 1.0),
+            )  # Assume 2x2x2m bounding box
+
+            return (
+                self._create_target_view_position(camera_fov_deg, target_bb),
+                top_down_rotation,
+            )
+
+        return mn.Matrix4.identity_init()
+
+    def _transition_state(
+        self,
+        next_state: SandboxState,
+        next_state_duration: float,
+        transition_duration: float,
+    ):
+        self._intro_previous_target_camera_transform = (
+            self._intro_target_camera_transform
+        )
+        self._intro_target_camera_transform = self._get_cam_transform(
+            next_state
+        )
+        self._intro_state_current_time = 0.0
+        self._intro_state_total_time = next_state_duration
+        self._intro_transition_current_time = 0.0
+        self._intro_transition_total_time = transition_duration
+        self._sandbox_state = next_state
+
+    def _step_intro(self, dt: float):
+        self._intro_state_current_time += dt
+        self._intro_transition_current_time += dt
+
+        # TODO: Initial state
+        if self._intro_target_camera_transform == None:
+            self._transition_state(SandboxState.INTRO_SCENE_OVERVIEW, 2.0, 1.0)
+            self._intro_previous_target_camera_transform = (
+                self._intro_target_camera_transform
+            )
+
+        translation = mn.math.lerp(
+            self._intro_previous_target_camera_transform[0],
+            self._intro_target_camera_transform[0],
+            self._ease_fn_in_out_quat(
+                min(
+                    self._intro_transition_current_time
+                    / self._intro_transition_total_time,
+                    1.0,
+                )
+            ),
+        )
+        self.cam_transform = (
+            mn.Matrix4.translation(translation)
+            @ self._intro_target_camera_transform[1]
+        )
+
+        if self._sandbox_state == SandboxState.SIMULATION:
+            return
+
+        if self._intro_state_current_time >= self._intro_state_total_time:
+            if self._sandbox_state == SandboxState.INTRO_SCENE_OVERVIEW:
+                self._transition_state(
+                    SandboxState.INTRO_FOCUS_AVATAR, 2.0, 1.0
+                )
+            elif self._sandbox_state == SandboxState.INTRO_FOCUS_AVATAR:
+                self._transition_state(
+                    SandboxState.INTRO_FOCUS_TARGET, 2.0, 1.0
+                )
+            elif self._sandbox_state == SandboxState.INTRO_FOCUS_TARGET:
+                self._transition_state(SandboxState.SIMULATION, 2.0, 1.0)
+
     def sim_update(self, dt):
         # todo: pipe end_play somewhere
 
@@ -594,7 +775,7 @@ class SandboxDriver(GuiAppDriver):
                 walk_dir, grasp_object_id, drop_pos, self.lookat_offset_yaw
             )
 
-        # Navmesh visualization only works in the debub third-person view
+        # Navmesh visualization only works in the debug third-person view
         # (--debug-third-person-width), not the main sandbox viewport. Navmesh
         # visualization is only implemented for simulator-rendering, not replay-
         # rendering.
@@ -605,64 +786,80 @@ class SandboxDriver(GuiAppDriver):
 
         action = self.ctrl_helper.update(self.obs)
 
-        self.obs = self.env.step(action)
+        if self._sandbox_state == SandboxState.SIMULATION:
+            self.obs = self.env.step(action)
 
-        if self.gui_input.get_key_down(GuiInput.KeyNS.M):
-            self.obs = self.env.reset()
-            self.ctrl_helper.on_environment_reset()
+            if self.gui_input.get_key_down(GuiInput.KeyNS.M):
+                self.obs = self.env.reset()
+                self.ctrl_helper.on_environment_reset()
 
-        self.visualize_task()
+            self.visualize_task()
+        else:
+            # Keyframes are saved by RearrangeSim when stepping.
+            # Because we are not stepping here, we need to save keyframes manually for replay rendering to work.
+            self.get_sim().gfx_replay_manager.save_keyframe()
 
         post_sim_update_dict = {}
 
-        if self.gui_input.mouse_scroll_offset != 0:
-            zoom_sensitivity = 0.07
-            if self.gui_input.mouse_scroll_offset < 0:
-                self.cam_zoom_dist *= (
-                    1.0
-                    + -self.gui_input.mouse_scroll_offset * zoom_sensitivity
+        if self._sandbox_state == SandboxState.SIMULATION:
+            if self.gui_input.mouse_scroll_offset != 0:
+                zoom_sensitivity = 0.07
+                if self.gui_input.mouse_scroll_offset < 0:
+                    self.cam_zoom_dist *= (
+                        1.0
+                        + -self.gui_input.mouse_scroll_offset
+                        * zoom_sensitivity
+                    )
+                else:
+                    self.cam_zoom_dist /= (
+                        1.0
+                        + self.gui_input.mouse_scroll_offset * zoom_sensitivity
+                    )
+                self.cam_zoom_dist = mn.math.clamp(
+                    self.cam_zoom_dist,
+                    self._min_zoom_dist,
+                    self._max_zoom_dist,
                 )
+
+            # two ways for camera pitch and yaw control for UX comparison:
+            # 1) press/hold ADIK keys
+            self._camera_pitch_and_yaw_wasd_control()
+            # 2) press left mouse button and move mouse
+            self._camera_pitch_and_yaw_mouse_control()
+
+            agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
+            if agent_idx is None:
+                self._free_camera_lookat_control()
+                lookat = self.lookat
             else:
-                self.cam_zoom_dist /= (
-                    1.0 + self.gui_input.mouse_scroll_offset * zoom_sensitivity
+                art_obj = (
+                    self.get_sim()
+                    .agents_mgr[agent_idx]
+                    .articulated_agent.sim_obj
                 )
-            self.cam_zoom_dist = mn.math.clamp(
-                self.cam_zoom_dist, self._min_zoom_dist, self._max_zoom_dist
+                robot_root = art_obj.transformation
+                lookat = robot_root.translation + mn.Vector3(0, 1, 0)
+
+            if self._first_person_mode:
+                self.cam_zoom_dist = self._min_zoom_dist
+                lookat += 0.075 * robot_root.backward
+                lookat -= mn.Vector3(0, 0.2, 0)
+
+            offset = mn.Vector3(
+                np.cos(self.lookat_offset_yaw)
+                * np.cos(self.lookat_offset_pitch),
+                np.sin(self.lookat_offset_pitch),
+                np.sin(self.lookat_offset_yaw)
+                * np.cos(self.lookat_offset_pitch),
             )
 
-        # two ways for camera pitch and yaw control for UX comparison:
-        # 1) press/hold ADIK keys
-        self._camera_pitch_and_yaw_wasd_control()
-        # 2) press left mouse button and move mouse
-        self._camera_pitch_and_yaw_mouse_control()
-
-        agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
-        if agent_idx is None:
-            self._free_camera_lookat_control()
-            lookat = self.lookat
+            self.cam_transform = mn.Matrix4.look_at(
+                lookat + offset.normalized() * self.cam_zoom_dist,
+                lookat,
+                mn.Vector3(0, 1, 0),
+            )
         else:
-            art_obj = (
-                self.get_sim().agents_mgr[agent_idx].articulated_agent.sim_obj
-            )
-            robot_root = art_obj.transformation
-            lookat = robot_root.translation + mn.Vector3(0, 1, 0)
-
-        if self._first_person_mode:
-            self.cam_zoom_dist = self._min_zoom_dist
-            lookat += 0.075 * robot_root.backward
-            lookat -= mn.Vector3(0, 0.2, 0)
-
-        offset = mn.Vector3(
-            np.cos(self.lookat_offset_yaw) * np.cos(self.lookat_offset_pitch),
-            np.sin(self.lookat_offset_pitch),
-            np.sin(self.lookat_offset_yaw) * np.cos(self.lookat_offset_pitch),
-        )
-
-        self.cam_transform = mn.Matrix4.look_at(
-            lookat + offset.normalized() * self.cam_zoom_dist,
-            lookat,
-            mn.Vector3(0, 1, 0),
-        )
+            self._step_intro(dt)
 
         post_sim_update_dict["cam_transform"] = self.cam_transform
 
@@ -866,6 +1063,12 @@ if __name__ == "__main__":
         default="./data/gfx-replay.json",
         type=str,
         help="Path where the captured graphics replay file is saved.",
+    )
+    parser.add_argument(
+        "--show-tutorial",
+        action="store_true",
+        default=False,
+        help="Shows an intro sequence that helps familiarize the user to the scene and task in a HITL context.",
     )
 
     args = parser.parse_args()
