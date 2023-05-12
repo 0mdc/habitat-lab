@@ -60,11 +60,25 @@ def requires_habitat_sim_with_bullet(callable_):
     return wrapper
 
 
+def _ease_fn_in_out_quat(t: float):
+    if t < 0.5:
+        return 16 * t * pow(t, 4)
+    else:
+        return 1 - pow(-2 * t + 2, 4) / 2
+
+
 class SandboxState(Enum):
     SIMULATION = 1
-    INTRO_SCENE_OVERVIEW = 2
-    INTRO_FOCUS_AVATAR = 3
-    INTRO_FOCUS_TARGET = 4
+    TUTORIAL = 2
+
+
+class TutorialState(Enum):
+    START = 1
+    SCENE_OVERVIEW = 2
+    TARGET_FOCUS = 3
+    AVATAR_FOCUS = 4
+    END = 5
+
 
 @requires_habitat_sim_with_bullet
 class SandboxDriver(GuiAppDriver):
@@ -98,22 +112,22 @@ class SandboxDriver(GuiAppDriver):
 
         self.lookat = None
 
-        self._first_frame = True
         self._sandbox_state = (
-            SandboxState.SIMULATION
-            if not args.show_tutorial
-            else SandboxState.INTRO_SCENE_OVERVIEW
+            SandboxState.TUTORIAL
+            if args.show_tutorial
+            else SandboxState.SIMULATION
         )
-        self._intro_previous_target_camera_transform: Tuple[
+        self._tutorial_camera_previous_transform: Tuple[
             mn.Vector3, mn.Matrix4
         ] = None
-        self._intro_target_camera_transform: Tuple[
+        self._tutorial_camera_target_transform: Tuple[
             mn.Vector3, mn.Matrix4
         ] = None
-        self._intro_transition_total_time: float = 0.0
-        self._intro_transition_current_time: float = 0.0
-        self._intro_state_total_time: float = 2.0
-        self._intro_state_current_time: float = 0.0
+        self._tutorial_transition_duration: float = 0.0
+        self._tutorial_transition_elapsed_time: float = 0.0
+        self._tutorial_state_duration: float = 0.0
+        self._tutorial_state_elapsed_time: float = 0.0
+        self._tutorial_state: TutorialState = TutorialState.START
 
         if self.is_free_camera_mode() and args.first_person_mode:
             raise RuntimeError(
@@ -599,11 +613,76 @@ class SandboxDriver(GuiAppDriver):
 
         return mn.Matrix4.identity_init()
 
-    def _ease_fn_in_out_quat(self, t: float):
-        if t < 0.5:
-            return 16 * t * pow(t, 4)
+    def _sim_update_simulation(self, dt: float):
+        if isinstance(self.gui_agent_ctrl, GuiHumanoidController):
+            (
+                walk_dir,
+                grasp_object_id,
+                drop_pos,
+            ) = self.viz_and_get_humanoid_hints()
+            self.gui_agent_ctrl.set_act_hints(
+                walk_dir, grasp_object_id, drop_pos, self.lookat_offset_yaw
+            )
+
+        action = self.ctrl_helper.update(self.obs)
+        self.obs = self.env.step(action)
+
+        if self.gui_input.get_key_down(GuiInput.KeyNS.M):
+            self.obs = self.env.reset()
+            self.ctrl_helper.on_environment_reset()
+
+        self.visualize_task()
+
+        if self.gui_input.mouse_scroll_offset != 0:
+            zoom_sensitivity = 0.07
+            if self.gui_input.mouse_scroll_offset < 0:
+                self.cam_zoom_dist *= (
+                    1.0
+                    + -self.gui_input.mouse_scroll_offset * zoom_sensitivity
+                )
+            else:
+                self.cam_zoom_dist /= (
+                    1.0 + self.gui_input.mouse_scroll_offset * zoom_sensitivity
+                )
+            self.cam_zoom_dist = mn.math.clamp(
+                self.cam_zoom_dist,
+                self._min_zoom_dist,
+                self._max_zoom_dist,
+            )
+
+        # two ways for camera pitch and yaw control for UX comparison:
+        # 1) press/hold ADIK keys
+        self._camera_pitch_and_yaw_wasd_control()
+        # 2) press left mouse button and move mouse
+        self._camera_pitch_and_yaw_mouse_control()
+
+        agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
+        if agent_idx is None:
+            self._free_camera_lookat_control()
+            lookat = self.lookat
         else:
-            return 1 - pow(-2 * t + 2, 4) / 2
+            art_obj = (
+                self.get_sim().agents_mgr[agent_idx].articulated_agent.sim_obj
+            )
+            robot_root = art_obj.transformation
+            lookat = robot_root.translation + mn.Vector3(0, 1, 0)
+
+        if self._first_person_mode:
+            self.cam_zoom_dist = self._min_zoom_dist
+            lookat += 0.075 * robot_root.backward
+            lookat -= mn.Vector3(0, 0.2, 0)
+
+        offset = mn.Vector3(
+            np.cos(self.lookat_offset_yaw) * np.cos(self.lookat_offset_pitch),
+            np.sin(self.lookat_offset_pitch),
+            np.sin(self.lookat_offset_yaw) * np.cos(self.lookat_offset_pitch),
+        )
+
+        self.cam_transform = mn.Matrix4.look_at(
+            lookat + offset.normalized() * self.cam_zoom_dist,
+            lookat,
+            mn.Vector3(0, 1, 0),
+        )
 
     def _create_target_view_position(self, camera_fov, target_bb: mn.Range3D):
         r"""
@@ -619,43 +698,25 @@ class SandboxDriver(GuiAppDriver):
         )
         return camera_position
 
-    def _get_cam_transform(
-        self, state: SandboxState
+    def _get_tutorial_cam_target_transform(
+        self, state: TutorialState
     ) -> Tuple[mn.Vector3, mn.Matrix4]:
         sim = self.get_sim()
-        camera_fov_deg = 90  # TODO: Get camera field of view from config
+        camera_fov_deg = 90  # TODO: Assume this FOV
         top_down_rotation = mn.Matrix4.rotation_x(mn.Deg(-90))
 
-        if state == SandboxState.INTRO_SCENE_OVERVIEW:
+        if (
+            state == TutorialState.START
+            or state == TutorialState.SCENE_OVERVIEW
+        ):
             root_node = sim.get_active_scene_graph().get_root_node()
-            root_node.compute_cumulative_bb()  # TODO: Was this already computed before?
             target_bb: mn.Range3D = root_node.cumulative_bb
             return (
                 self._create_target_view_position(camera_fov_deg, target_bb),
                 top_down_rotation,
             )
 
-        elif state == SandboxState.INTRO_FOCUS_AVATAR:
-            agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
-            assert agent_idx is not None
-            art_obj = (
-                self.get_sim().agents_mgr[agent_idx].articulated_agent.sim_obj
-            )
-            root_node = art_obj.get_link_scene_node(
-                -1
-            )  # Root link always has index -1
-
-            target_bb = mn.Range3D.from_center(
-                mn.Vector3(root_node.absolute_translation),
-                mn.Vector3(1.0, 1.0, 1.0),
-            )  # Assume 2x2x2m bounding box
-
-            return (
-                self._create_target_view_position(camera_fov_deg, target_bb),
-                top_down_rotation,
-            )
-
-        elif state == SandboxState.INTRO_FOCUS_TARGET:
+        elif state == TutorialState.TARGET_FOCUS:
             idxs, goal_pos = sim.get_targets()
             scene_pos = sim.get_scene_pos()
             target_pos = scene_pos[idxs]
@@ -668,7 +729,25 @@ class SandboxDriver(GuiAppDriver):
                 top_down_rotation,
             )
 
-        elif state == SandboxState.SIMULATION:
+        elif state == TutorialState.AVATAR_FOCUS:
+            agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
+            assert agent_idx is not None
+            art_obj = (
+                self.get_sim().agents_mgr[agent_idx].articulated_agent.sim_obj
+            )
+            root_node = art_obj.get_link_scene_node(
+                -1
+            )  # Root link always has index -1
+            target_bb = mn.Range3D.from_center(
+                mn.Vector3(root_node.absolute_translation),
+                mn.Vector3(1.0, 1.0, 1.0),
+            )  # Assume 2x2x2m bounding box
+            return (
+                self._create_target_view_position(camera_fov_deg, target_bb),
+                top_down_rotation,
+            )
+
+        elif state == TutorialState.END:
             # TODO
             agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
             assert agent_idx is not None
@@ -693,63 +772,72 @@ class SandboxDriver(GuiAppDriver):
 
     def _transition_state(
         self,
-        next_state: SandboxState,
+        next_state: TutorialState,
         next_state_duration: float,
         transition_duration: float,
     ):
-        self._intro_previous_target_camera_transform = (
-            self._intro_target_camera_transform
+        self._tutorial_camera_previous_transform = (
+            self._tutorial_camera_target_transform
         )
-        self._intro_target_camera_transform = self._get_cam_transform(
-            next_state
+        self._tutorial_camera_target_transform = (
+            self._get_tutorial_cam_target_transform(next_state)
         )
-        self._intro_state_current_time = 0.0
-        self._intro_state_total_time = next_state_duration
-        self._intro_transition_current_time = 0.0
-        self._intro_transition_total_time = transition_duration
-        self._sandbox_state = next_state
-
-    def _step_intro(self, dt: float):
-        self._intro_state_current_time += dt
-        self._intro_transition_current_time += dt
-
-        # TODO: Initial state
-        if self._intro_target_camera_transform == None:
-            self._transition_state(SandboxState.INTRO_SCENE_OVERVIEW, 2.0, 1.0)
-            self._intro_previous_target_camera_transform = (
-                self._intro_target_camera_transform
+        if self._tutorial_camera_previous_transform == None:
+            self._tutorial_camera_previous_transform = (
+                self._tutorial_camera_target_transform
             )
+        self._tutorial_state_elapsed_time = 0.0
+        self._tutorial_state_duration = next_state_duration
+        self._tutorial_transition_elapsed_time = 0.0
+        self._tutorial_transition_duration = transition_duration
+        self._tutorial_state = next_state
 
-        translation = mn.math.lerp(
-            self._intro_previous_target_camera_transform[0],
-            self._intro_target_camera_transform[0],
-            self._ease_fn_in_out_quat(
-                min(
-                    self._intro_transition_current_time
-                    / self._intro_transition_total_time,
-                    1.0,
-                )
-            ),
+    def _sim_update_tutorial(self, dt: float):
+        # Keyframes are saved by RearrangeSim when stepping the environment.
+        # Because the environment is not stepped in the tutorial, we need to save keyframes manually for replay rendering to work.
+        self.get_sim().gfx_replay_manager.save_keyframe()
+
+        self._tutorial_state_elapsed_time += dt
+        self._tutorial_transition_elapsed_time += dt
+
+        if self._tutorial_state_elapsed_time >= self._tutorial_state_duration:
+            # Initialization
+            if self._tutorial_state == TutorialState.START:
+                self._transition_state(TutorialState.SCENE_OVERVIEW, 2.0, 1.0)
+            # Scene Overview -> Target Focus
+            elif self._tutorial_state == TutorialState.SCENE_OVERVIEW:
+                self._transition_state(TutorialState.TARGET_FOCUS, 2.0, 1.0)
+            # Target Focus -> Avatar Focus
+            elif self._tutorial_state == TutorialState.TARGET_FOCUS:
+                self._transition_state(TutorialState.AVATAR_FOCUS, 2.0, 1.0)
+            # Avatar Focus -> Tutorial End
+            elif self._tutorial_state == TutorialState.AVATAR_FOCUS:
+                self._transition_state(TutorialState.END, 1.0, 1.0)
+            # Switch to simulation
+            elif self._tutorial_state == TutorialState.END:
+                self._sandbox_state = SandboxState.SIMULATION
+
+        # Interpolate camera transition
+        translation = (
+            mn.math.lerp(
+                self._tutorial_camera_previous_transform[0],
+                self._tutorial_camera_target_transform[0],
+                _ease_fn_in_out_quat(
+                    min(
+                        self._tutorial_transition_elapsed_time
+                        / self._tutorial_transition_duration,
+                        1.0,
+                    )
+                ),
+            )
+            if self._tutorial_transition_duration > 0.0
+            else self._tutorial_camera_target_transform[0]
         )
+
         self.cam_transform = (
             mn.Matrix4.translation(translation)
-            @ self._intro_target_camera_transform[1]
+            @ self._tutorial_camera_target_transform[1]
         )
-
-        if self._sandbox_state == SandboxState.SIMULATION:
-            return
-
-        if self._intro_state_current_time >= self._intro_state_total_time:
-            if self._sandbox_state == SandboxState.INTRO_SCENE_OVERVIEW:
-                self._transition_state(
-                    SandboxState.INTRO_FOCUS_AVATAR, 2.0, 1.0
-                )
-            elif self._sandbox_state == SandboxState.INTRO_FOCUS_AVATAR:
-                self._transition_state(
-                    SandboxState.INTRO_FOCUS_TARGET, 2.0, 1.0
-                )
-            elif self._sandbox_state == SandboxState.INTRO_FOCUS_TARGET:
-                self._transition_state(SandboxState.SIMULATION, 2.0, 1.0)
 
     def sim_update(self, dt):
         # todo: pipe end_play somewhere
@@ -764,16 +852,6 @@ class SandboxDriver(GuiAppDriver):
             self._viz_anim_fraction + dt * viz_anim_speed
         ) % 1.0
 
-        if isinstance(self.gui_agent_ctrl, GuiHumanoidController):
-            (
-                walk_dir,
-                grasp_object_id,
-                drop_pos,
-            ) = self.viz_and_get_humanoid_hints()
-            self.gui_agent_ctrl.set_act_hints(
-                walk_dir, grasp_object_id, drop_pos, self.lookat_offset_yaw
-            )
-
         # Navmesh visualization only works in the debug third-person view
         # (--debug-third-person-width), not the main sandbox viewport. Navmesh
         # visualization is only implemented for simulator-rendering, not replay-
@@ -783,83 +861,12 @@ class SandboxDriver(GuiAppDriver):
                 not self.env._sim.navmesh_visualization  # type: ignore
             )
 
-        action = self.ctrl_helper.update(self.obs)
-
         if self._sandbox_state == SandboxState.SIMULATION:
-            self.obs = self.env.step(action)
-
-            if self.gui_input.get_key_down(GuiInput.KeyNS.M):
-                self.obs = self.env.reset()
-                self.ctrl_helper.on_environment_reset()
-
-            self.visualize_task()
+            self._sim_update_simulation(dt)
         else:
-            # Keyframes are saved by RearrangeSim when stepping.
-            # Because we are not stepping here, we need to save keyframes manually for replay rendering to work.
-            self.get_sim().gfx_replay_manager.save_keyframe()
+            self._sim_update_tutorial(dt)
 
         post_sim_update_dict = {}
-
-        if self._sandbox_state == SandboxState.SIMULATION:
-            if self.gui_input.mouse_scroll_offset != 0:
-                zoom_sensitivity = 0.07
-                if self.gui_input.mouse_scroll_offset < 0:
-                    self.cam_zoom_dist *= (
-                        1.0
-                        + -self.gui_input.mouse_scroll_offset
-                        * zoom_sensitivity
-                    )
-                else:
-                    self.cam_zoom_dist /= (
-                        1.0
-                        + self.gui_input.mouse_scroll_offset * zoom_sensitivity
-                    )
-                self.cam_zoom_dist = mn.math.clamp(
-                    self.cam_zoom_dist,
-                    self._min_zoom_dist,
-                    self._max_zoom_dist,
-                )
-
-            # two ways for camera pitch and yaw control for UX comparison:
-            # 1) press/hold ADIK keys
-            self._camera_pitch_and_yaw_wasd_control()
-            # 2) press left mouse button and move mouse
-            self._camera_pitch_and_yaw_mouse_control()
-
-            agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
-            if agent_idx is None:
-                self._free_camera_lookat_control()
-                lookat = self.lookat
-            else:
-                art_obj = (
-                    self.get_sim()
-                    .agents_mgr[agent_idx]
-                    .articulated_agent.sim_obj
-                )
-                robot_root = art_obj.transformation
-                lookat = robot_root.translation + mn.Vector3(0, 1, 0)
-
-            if self._first_person_mode:
-                self.cam_zoom_dist = self._min_zoom_dist
-                lookat += 0.075 * robot_root.backward
-                lookat -= mn.Vector3(0, 0.2, 0)
-
-            offset = mn.Vector3(
-                np.cos(self.lookat_offset_yaw)
-                * np.cos(self.lookat_offset_pitch),
-                np.sin(self.lookat_offset_pitch),
-                np.sin(self.lookat_offset_yaw)
-                * np.cos(self.lookat_offset_pitch),
-            )
-
-            self.cam_transform = mn.Matrix4.look_at(
-                lookat + offset.normalized() * self.cam_zoom_dist,
-                lookat,
-                mn.Vector3(0, 1, 0),
-            )
-        else:
-            self._step_intro(dt)
-
         post_sim_update_dict["cam_transform"] = self.cam_transform
 
         self._update_cursor_style(post_sim_update_dict)
