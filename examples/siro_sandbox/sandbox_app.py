@@ -66,7 +66,10 @@ def _ease_fn_in_out_quat(t: float):
     else:
         return 1 - pow(-2 * t + 2, 4) / 2
 
-def _lookat_bounding_box(camera_fov, target_bb: mn.Range3D) -> Tuple[mn.Vector3, mn.Vector3]:
+
+def _lookat_bounding_box(
+    camera_fov, target_bb: mn.Range3D
+) -> Tuple[mn.Vector3, mn.Vector3]:
     r"""
     Creates lookat vectors for a top-down camera such as the entire 'target_bb' bounding box is visible.
     """
@@ -626,7 +629,32 @@ class SandboxDriver(GuiAppDriver):
         self._text_drawer.add_text(s, TextOnScreenAlignment.TOP_LEFT)
 
         return mn.Matrix4.identity_init()
-    
+
+    def _create_camera_lookat(self) -> Tuple[mn.Vector3, mn.Vector3]:
+        agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
+        if agent_idx is None:
+            self._free_camera_lookat_control()
+            lookat = self.lookat
+        else:
+            art_obj = (
+                self.get_sim().agents_mgr[agent_idx].articulated_agent.sim_obj
+            )
+            robot_root = art_obj.transformation
+            lookat = robot_root.translation + mn.Vector3(0, 1, 0)
+
+        if self._first_person_mode:
+            self.cam_zoom_dist = self._min_zoom_dist
+            lookat += 0.075 * robot_root.backward
+            lookat -= mn.Vector3(0, 0.2, 0)
+
+        offset = mn.Vector3(
+            np.cos(self.lookat_offset_yaw) * np.cos(self.lookat_offset_pitch),
+            np.sin(self.lookat_offset_pitch),
+            np.sin(self.lookat_offset_yaw) * np.cos(self.lookat_offset_pitch),
+        )
+
+        return (lookat + offset.normalized() * self.cam_zoom_dist, lookat)
+
     def _sim_update_simulation(self, dt: float):
         if isinstance(self.gui_agent_ctrl, GuiHumanoidController):
             (
@@ -668,35 +696,10 @@ class SandboxDriver(GuiAppDriver):
         # 2) press left mouse button and move mouse
         self._camera_pitch_and_yaw_mouse_control()
 
-        agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
-        if agent_idx is None:
-            self._free_camera_lookat_control()
-            lookat = self.lookat
-        else:
-            art_obj = (
-                self.get_sim().agents_mgr[agent_idx].articulated_agent.sim_obj
-            )
-            robot_root = art_obj.transformation
-            lookat = robot_root.translation + mn.Vector3(0, 1, 0)
-
-        if self._first_person_mode:
-            self.cam_zoom_dist = self._min_zoom_dist
-            lookat += 0.075 * robot_root.backward
-            lookat -= mn.Vector3(0, 0.2, 0)
-
-        offset = mn.Vector3(
-            np.cos(self.lookat_offset_yaw) * np.cos(self.lookat_offset_pitch),
-            np.sin(self.lookat_offset_pitch),
-            np.sin(self.lookat_offset_yaw) * np.cos(self.lookat_offset_pitch),
-        )
-
+        lookat = self._create_camera_lookat()
         self.cam_transform = mn.Matrix4.look_at(
-            lookat + offset.normalized() * self.cam_zoom_dist,
-            lookat,
-            mn.Vector3(0, 1, 0),
+            lookat[0], lookat[1], mn.Vector3(0, 1, 0)
         )
-
-   
 
     def _get_tutorial_cam_target_transform(
         self, state: TutorialState
@@ -738,23 +741,8 @@ class SandboxDriver(GuiAppDriver):
             return _lookat_bounding_box(camera_fov_deg, target_bb)
 
         else:
-            # TODO
-            agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
-            assert agent_idx is not None
-            art_obj = (
-                self.get_sim().agents_mgr[agent_idx].articulated_agent.sim_obj
-            )
-            root_node = art_obj.get_link_scene_node(
-                -1
-            )  # Root link always has index -1
+            return self._create_camera_lookat()
 
-            target_bb = mn.Range3D.from_center(
-                mn.Vector3(root_node.absolute_translation),
-                mn.Vector3(1.0, 1.0, 1.0),
-            )  # Assume 2x2x2m bounding box
-
-            return _lookat_bounding_box(camera_fov_deg, target_bb)
-    
     def _transition_state(
         self,
         next_state: TutorialState,
@@ -788,10 +776,10 @@ class SandboxDriver(GuiAppDriver):
         if self._tutorial_state_elapsed_time >= self._tutorial_state_duration:
             # Initialization
             if self._tutorial_state == TutorialState.START:
-                self._transition_state(TutorialState.SCENE_OVERVIEW, 2.0, 1.0)
+                self._transition_state(TutorialState.SCENE_OVERVIEW, 10.0, 1.0)
             # Scene Overview -> Target Focus
             elif self._tutorial_state == TutorialState.SCENE_OVERVIEW:
-                self._transition_state(TutorialState.TARGET_FOCUS, 2.0, 1.0)
+                self._transition_state(TutorialState.TARGET_FOCUS, 3.0, 1.0)
             # Target Focus -> Avatar Focus
             elif self._tutorial_state == TutorialState.TARGET_FOCUS:
                 self._transition_state(TutorialState.AVATAR_FOCUS, 2.0, 1.0)
@@ -803,15 +791,19 @@ class SandboxDriver(GuiAppDriver):
                 self._sandbox_state = SandboxState.SIMULATION
 
         # Interpolate camera transition
-        t: float = _ease_fn_in_out_quat(
-                        min(
-                            self._tutorial_transition_elapsed_time
-                            / self._tutorial_transition_duration,
-                            1.0,
-                        )
-                    ) if self._tutorial_transition_duration > 0.0 else 1.0
+        t: float = (
+            _ease_fn_in_out_quat(
+                min(
+                    self._tutorial_transition_elapsed_time
+                    / self._tutorial_transition_duration,
+                    1.0,
+                )
+            )
+            if self._tutorial_transition_duration > 0.0
+            else 1.0
+        )
         look_at: List[mn.Vector3] = []
-        for i in range(2): # Only interpolate eye and target vectors
+        for i in range(2):  # Only interpolate eye and target vectors
             look_at.append(
                 mn.math.lerp(
                     self._tutorial_camera_previous_lookat[i],
@@ -819,7 +811,9 @@ class SandboxDriver(GuiAppDriver):
                     t,
                 )
             )
-        self.cam_transform = mn.Matrix4.look_at(look_at[0], look_at[1], mn.Vector3(0, 1, 0))
+        self.cam_transform = mn.Matrix4.look_at(
+            look_at[0], look_at[1], mn.Vector3(0, 1, 0)
+        )
 
     def sim_update(self, dt):
         # todo: pipe end_play somewhere
