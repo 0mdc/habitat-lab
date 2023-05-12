@@ -631,8 +631,6 @@ class SandboxDriver(GuiAppDriver):
             self.obs = self.env.reset()
             self.ctrl_helper.on_environment_reset()
 
-        self.visualize_task()
-
         if self.gui_input.mouse_scroll_offset != 0:
             zoom_sensitivity = 0.07
             if self.gui_input.mouse_scroll_offset < 0:
@@ -865,6 +863,8 @@ class SandboxDriver(GuiAppDriver):
             self._sim_update_simulation(dt)
         else:
             self._sim_update_tutorial(dt)
+
+        self.visualize_task()
 
         post_sim_update_dict = {}
         post_sim_update_dict["cam_transform"] = self.cam_transform
