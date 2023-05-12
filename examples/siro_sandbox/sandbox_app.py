@@ -66,6 +66,20 @@ def _ease_fn_in_out_quat(t: float):
     else:
         return 1 - pow(-2 * t + 2, 4) / 2
 
+def _lookat_bounding_box(camera_fov, target_bb: mn.Range3D) -> Tuple[mn.Vector3, mn.Vector3]:
+    r"""
+    Creates lookat vectors for a top-down camera such as the entire 'target_bb' bounding box is visible.
+    """
+    camera_fov_rad = radians(camera_fov)
+    target_dimension = max(target_bb.size_x(), target_bb.size_z())
+    camera_position = mn.Vector3(
+        target_bb.center_x(),
+        target_bb.center_y()
+        + abs(target_dimension / math.sin(camera_fov_rad / 2)),
+        target_bb.center_z(),
+    )
+    return (camera_position, target_bb.center() + mn.Vector3(0.0, 0.0, 0.0001))
+
 
 class SandboxState(Enum):
     SIMULATION = 1
@@ -117,11 +131,11 @@ class SandboxDriver(GuiAppDriver):
             if args.show_tutorial
             else SandboxState.SIMULATION
         )
-        self._tutorial_camera_previous_transform: Tuple[
-            mn.Vector3, mn.Matrix4
+        self._tutorial_camera_previous_lookat: Tuple[
+            mn.Vector3, mn.Vector3
         ] = None
-        self._tutorial_camera_target_transform: Tuple[
-            mn.Vector3, mn.Matrix4
+        self._tutorial_camera_target_lookat: Tuple[
+            mn.Vector3, mn.Vector3
         ] = None
         self._tutorial_transition_duration: float = 0.0
         self._tutorial_transition_elapsed_time: float = 0.0
@@ -612,7 +626,7 @@ class SandboxDriver(GuiAppDriver):
         self._text_drawer.add_text(s, TextOnScreenAlignment.TOP_LEFT)
 
         return mn.Matrix4.identity_init()
-
+    
     def _sim_update_simulation(self, dt: float):
         if isinstance(self.gui_agent_ctrl, GuiHumanoidController):
             (
@@ -682,26 +696,13 @@ class SandboxDriver(GuiAppDriver):
             mn.Vector3(0, 1, 0),
         )
 
-    def _create_target_view_position(self, camera_fov, target_bb: mn.Range3D):
-        r"""
-        Creates a position matrix for a top-down camera such as the entire 'target_bb' bounding box is visible.
-        """
-        camera_fov_rad = radians(camera_fov)
-        target_dimension = max(target_bb.size_x(), target_bb.size_z())
-        camera_position = mn.Vector3(
-            target_bb.center_x(),
-            target_bb.center_y()
-            + abs(target_dimension / math.sin(camera_fov_rad / 2)),
-            target_bb.center_z(),
-        )
-        return camera_position
+   
 
     def _get_tutorial_cam_target_transform(
         self, state: TutorialState
-    ) -> Tuple[mn.Vector3, mn.Matrix4]:
+    ) -> Tuple[mn.Vector3, mn.Vector3]:
         sim = self.get_sim()
         camera_fov_deg = 90  # TODO: Assume this FOV
-        top_down_rotation = mn.Matrix4.rotation_x(mn.Deg(-90))
 
         if (
             state == TutorialState.START
@@ -709,10 +710,7 @@ class SandboxDriver(GuiAppDriver):
         ):
             root_node = sim.get_active_scene_graph().get_root_node()
             target_bb: mn.Range3D = root_node.cumulative_bb
-            return (
-                self._create_target_view_position(camera_fov_deg, target_bb),
-                top_down_rotation,
-            )
+            return _lookat_bounding_box(camera_fov_deg, target_bb)
 
         elif state == TutorialState.TARGET_FOCUS:
             idxs, goal_pos = sim.get_targets()
@@ -722,10 +720,7 @@ class SandboxDriver(GuiAppDriver):
             target_bb = mn.Range3D.from_center(
                 mn.Vector3(this_target_pos), mn.Vector3(0.5, 0.5, 0.5)
             )  # Assume 1x1x1m bounding box
-            return (
-                self._create_target_view_position(camera_fov_deg, target_bb),
-                top_down_rotation,
-            )
+            return _lookat_bounding_box(camera_fov_deg, target_bb)
 
         elif state == TutorialState.AVATAR_FOCUS:
             agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
@@ -740,12 +735,9 @@ class SandboxDriver(GuiAppDriver):
                 mn.Vector3(root_node.absolute_translation),
                 mn.Vector3(1.0, 1.0, 1.0),
             )  # Assume 2x2x2m bounding box
-            return (
-                self._create_target_view_position(camera_fov_deg, target_bb),
-                top_down_rotation,
-            )
+            return _lookat_bounding_box(camera_fov_deg, target_bb)
 
-        elif state == TutorialState.END:
+        else:
             # TODO
             agent_idx = self.ctrl_helper.get_gui_controlled_agent_index()
             assert agent_idx is not None
@@ -761,28 +753,23 @@ class SandboxDriver(GuiAppDriver):
                 mn.Vector3(1.0, 1.0, 1.0),
             )  # Assume 2x2x2m bounding box
 
-            return (
-                self._create_target_view_position(camera_fov_deg, target_bb),
-                top_down_rotation,
-            )
-
-        return mn.Matrix4.identity_init()
-
+            return _lookat_bounding_box(camera_fov_deg, target_bb)
+    
     def _transition_state(
         self,
         next_state: TutorialState,
         next_state_duration: float,
         transition_duration: float,
     ):
-        self._tutorial_camera_previous_transform = (
-            self._tutorial_camera_target_transform
+        self._tutorial_camera_previous_lookat = (
+            self._tutorial_camera_target_lookat
         )
-        self._tutorial_camera_target_transform = (
+        self._tutorial_camera_target_lookat = (
             self._get_tutorial_cam_target_transform(next_state)
         )
-        if self._tutorial_camera_previous_transform == None:
-            self._tutorial_camera_previous_transform = (
-                self._tutorial_camera_target_transform
+        if self._tutorial_camera_previous_lookat == None:
+            self._tutorial_camera_previous_lookat = (
+                self._tutorial_camera_target_lookat
             )
         self._tutorial_state_elapsed_time = 0.0
         self._tutorial_state_duration = next_state_duration
@@ -816,26 +803,23 @@ class SandboxDriver(GuiAppDriver):
                 self._sandbox_state = SandboxState.SIMULATION
 
         # Interpolate camera transition
-        translation = (
-            mn.math.lerp(
-                self._tutorial_camera_previous_transform[0],
-                self._tutorial_camera_target_transform[0],
-                _ease_fn_in_out_quat(
-                    min(
-                        self._tutorial_transition_elapsed_time
-                        / self._tutorial_transition_duration,
-                        1.0,
-                    )
-                ),
+        t: float = _ease_fn_in_out_quat(
+                        min(
+                            self._tutorial_transition_elapsed_time
+                            / self._tutorial_transition_duration,
+                            1.0,
+                        )
+                    ) if self._tutorial_transition_duration > 0.0 else 1.0
+        look_at: List[mn.Vector3] = []
+        for i in range(2): # Only interpolate eye and target vectors
+            look_at.append(
+                mn.math.lerp(
+                    self._tutorial_camera_previous_lookat[i],
+                    self._tutorial_camera_target_lookat[i],
+                    t,
+                )
             )
-            if self._tutorial_transition_duration > 0.0
-            else self._tutorial_camera_target_transform[0]
-        )
-
-        self.cam_transform = (
-            mn.Matrix4.translation(translation)
-            @ self._tutorial_camera_target_transform[1]
-        )
+        self.cam_transform = mn.Matrix4.look_at(look_at[0], look_at[1], mn.Vector3(0, 1, 0))
 
     def sim_update(self, dt):
         # todo: pipe end_play somewhere
