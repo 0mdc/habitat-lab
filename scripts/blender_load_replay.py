@@ -98,10 +98,15 @@ def import_scene_helper(raw_filepath):
             break
     else:
         raise RuntimeError("can't find file " + raw_filepath, filepath)
+    
+
+    if not os.path.isfile(filepath):
+        print("ERROR: Cannot find file: " + filepath)
 
     ext = os.path.splitext(filepath)[-1].lower()
     if ext == ".dae":
         # Convert to GLB.
+        # TODO: This adds a dependency to assimp
         orig_filepath = filepath
         filepath = filepath.replace(".dae", ".glb")
         raw_filepath = raw_filepath.replace(".dae", ".glb")
@@ -114,9 +119,12 @@ def import_scene_helper(raw_filepath):
             filepath += ".orig"
 
         filename = os.path.basename(filepath)
-        bpy.ops.import_scene.gltf(
-            filepath=filepath, files=[{"name": filename}],  bone_heuristic="BLENDER"
-        )
+        try:
+            bpy.ops.import_scene.gltf(
+                filepath=filepath, files=[{"name": filename}],  bone_heuristic="BLENDER"
+            )
+        except:
+            print("FAILED: " + filepath)
     elif ext == ".obj":
         bpy.ops.import_scene.obj(filepath=filepath)
     elif ext == ".stl":
@@ -257,9 +265,10 @@ def import_gfx_replay(replay_filepath, settings):
                 for bone in rig.armature.pose.bones:
                     if bone.name == boneName:
                         rig.bone_map[bone_id] = bone
+                        #TODO: Fails if multiple creations
 
                         # Create animation point cloud.
-                        mesh = bpy.data.meshes.new('_source_' + str(rig_id) + '_' + bone.name)
+                        mesh = bpy.data.meshes.new('_debug_geom_' + str(rig_id) + '_' + bone.name)
                         obj = bpy.data.objects.new('_source_' + str(rig_id) + '_' + str(bone.name), mesh)
                         rig.point_cloud[bone_id] = obj
                         bpy.context.collection.objects.link(obj)
@@ -278,7 +287,10 @@ def import_gfx_replay(replay_filepath, settings):
                         # Add constraint to bone so that it follows its associated point in the point cloud.
                         constraint = bone.constraints.new('COPY_TRANSFORMS')
                         constraint.target = obj
+                        bpy.context.view_layer.update()
                         break
+        
+        bpy.context.view_layer.update()
 
         if "stateUpdates" in keyframe:
             for update_dict in keyframe["stateUpdates"]:
@@ -324,7 +336,7 @@ def import_gfx_replay(replay_filepath, settings):
 
         # Grounding translation
         # TODO: The model isn't grounded. For now, this empirical correction is used.
-        rig_grounding_matrix = mathutils.Matrix.Translation([0.0, 0.0, -0.41])
+        rig_grounding_matrix = mathutils.Matrix.Translation([0.0, 0.0, -0.125]) # -0.41
 
         # Bone orientation correction matrix
         # TODO: The model bone orientation is wrong. For now, this empirical correction is used.
@@ -363,6 +375,8 @@ def import_gfx_replay(replay_filepath, settings):
 
                 # The bones are animated by constraining them to their associated point in the point cloud.
                 # This animation method is used to avoid animation jittering caused by directly assigning bone matrices.
+                #print(str(bone_id))
+                #print(rig.point_cloud[bone_id].name)
                 rig.point_cloud[bone_id].matrix_world = bone_world_matrix
 
         if do_add_anim_keyframes:
