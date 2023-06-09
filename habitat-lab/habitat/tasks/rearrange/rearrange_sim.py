@@ -196,7 +196,7 @@ class RearrangeSim(HabitatSim):
         return target_trans
 
     def _try_acquire_context(self):
-        if self._concur_render:
+        if self._concur_render and self.renderer:
             self.renderer.acquire_gl_context()
 
     def _sleep_all_objects(self):
@@ -756,8 +756,13 @@ class RearrangeSim(HabitatSim):
             self.viz_ids = defaultdict(lambda: None)
 
         self.maybe_update_articulated_agent()
-
-        if self._concur_render:
+        
+        if self.habitat_config.enable_batch_renderer:
+            for _ in range(self.ac_freq_ratio):
+                self.internal_step(-1, update_articulated_agent=False)
+            self._prev_sim_obs = self.get_sensor_observations()
+            self.add_keyframe_to_observations(self._prev_sim_obs)
+        elif self._concur_render:
             self._prev_sim_obs = self.start_async_render()
 
             for _ in range(self.ac_freq_ratio):
@@ -770,15 +775,17 @@ class RearrangeSim(HabitatSim):
                 self.internal_step(-1, update_articulated_agent=False)
             self._prev_sim_obs = self.get_sensor_observations()
             obs = self._sensor_suite.get_observations(self._prev_sim_obs)
-
-        if self._enable_gfx_replay_save:
+        
+        # TODO: Support batch renderer
+        if self._enable_gfx_replay_save and not self.habitat_config.enable_batch_renderer:
             self.gfx_replay_manager.save_keyframe()
 
         if self._needs_markers:
             self._update_markers()
 
         # TODO: Make debug cameras more flexible
-        if "third_rgb" in obs and self._debug_render:
+        # TODO: Support batch renderer
+        if "third_rgb" in obs and self._debug_render and not self.habitat_config.enable_batch_renderer:
             self._try_acquire_context()
             for k, (pos, r) in add_back_viz_objs.items():
                 viz_id = self.viz_ids[k]
@@ -841,7 +848,7 @@ class RearrangeSim(HabitatSim):
     ) -> None:
         """Step the world and update the articulated_agent.
 
-        :param dt: Timestep by which to advance the world. Multiple physics substeps can be excecuted within a single timestep. -1 indicates a single physics substep.
+        :param dt: Timestep by which to advance the world. Multiple physics substeps can be executed within a single timestep. -1 indicates a single physics substep.
 
         Never call sim.step_world directly or miss updating the articulated_agent.
         """

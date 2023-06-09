@@ -22,7 +22,8 @@ habitat:
     additional_object_paths:
       - data/objects/ycb/configs/
     needs_markers: False
-    concur_render: True
+    concur_render: False
+    create_renderer: False
     auto_sleep: True
     agents:
       main_agent:
@@ -33,6 +34,12 @@ habitat:
     habitat_sim_v0:
       allow_sliding: False
       enable_physics: True
+      enable_gfx_replay: True
+      gpu_gpu: False
+
+    renderer:
+      enable_batch_renderer: True
+      composite_files: "/home/mdcote/Documents/git/datasets/composite-replica-20221209/replica.gltf"
 
   dataset:
     data_path: data/datasets/replica_cad/rearrange/v1/{split}/rearrange_easy.json.gz

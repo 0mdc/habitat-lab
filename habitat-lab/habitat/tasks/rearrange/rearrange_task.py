@@ -205,7 +205,10 @@ class RearrangeTask(NavigationTask):
 
     def _get_observations(self, episode):
         obs = self._sim.get_sensor_observations()
-        obs = self._sim._sensor_suite.get_observations(obs)
+        if not self._config.enable_batch_renderer:
+            obs = self._sim._sensor_suite.get_observations(obs)
+        else:
+            self._sim.add_keyframe_to_observations(obs)
 
         task_obs = self.sensor_suite.get_observations(
             observations=obs, episode=episode, task=self

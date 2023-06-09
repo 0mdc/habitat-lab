@@ -251,6 +251,7 @@ class PPOTrainer(BaseRLTrainer):
         self._ppo_cfg = self.config.habitat_baselines.rl.ppo
 
         observations = self.envs.reset()
+        observations = self.envs.post_step(observations)
         batch = batch_obs(observations, device=self.device)
         batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
 
@@ -396,8 +397,9 @@ class PPOTrainer(BaseRLTrainer):
         ]
 
         self.env_time += time.time() - t_step_env
-
         t_update_stats = time.time()
+
+        observations = self.envs.post_step(observations)
         batch = batch_obs(observations, device=self.device)
         batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
 
@@ -822,6 +824,7 @@ class PPOTrainer(BaseRLTrainer):
             self._agent.load_state_dict(ckpt_dict)
 
         observations = self.envs.reset()
+        observations = self.envs.post_step(observations)
         batch = batch_obs(observations, device=self.device)
         batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
 
@@ -937,6 +940,8 @@ class PPOTrainer(BaseRLTrainer):
             )
             for i in range(len(policy_infos)):
                 infos[i].update(policy_infos[i])
+        
+            observations = self.envs.post_step(observations)
             batch = batch_obs(  # type: ignore
                 observations,
                 device=self.device,
